@@ -25,9 +25,9 @@ jobs:
           --health-retries 5
 
     env:
-      DROP_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/drop_test
-      TEST_DROP_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/drop_test
-      DROP_TOKEN: ci-test-token
+      DROPWELL_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/drop_test
+      TEST_DROPWELL_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/drop_test
+      DROPWELL_TOKEN: ci-test-token
 
     steps:
       - uses: actions/checkout@v4

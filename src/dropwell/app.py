@@ -6,9 +6,9 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from drop import __version__
-from drop.config import get_settings
-from drop.db import (
+from dropwell import __version__
+from dropwell.config import get_settings
+from dropwell.db import (
     VALID_STATUSES,
     delete_drop,
     get_conn,

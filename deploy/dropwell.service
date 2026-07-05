@@ -1,0 +1,14 @@
+[Unit]
+Description=dropwell personal capture API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/dropwell
+EnvironmentFile=/opt/dropwell/.env
+ExecStart=/opt/drop/.venv/bin/uvicorn dropwell.app:app --host 127.0.0.1 --port 9731
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,10 +1,10 @@
-# CLAUDE.md - drop
+# CLAUDE.md - dropwell
 
 This file gives agent-facing guidance for working in this repository.
 
 ## Project Summary
 
-`drop` is a small authenticated FastAPI service for capturing raw UTF-8
+`dropwell` is a small authenticated FastAPI service for capturing raw UTF-8
 payloads under topic-based endpoints and storing them in PostgreSQL.
 
 It is deliberately narrow:
@@ -33,11 +33,11 @@ Personal project. Not affiliated with my employer.
 uv sync --extra dev
 uv run ruff check .
 uv run pytest
-uv run uvicorn drop.app:app --host 127.0.0.1 --port 9731 --reload
+uv run uvicorn dropwell.app:app --host 127.0.0.1 --port 9731 --reload
 ```
 
 Tests expect a PostgreSQL database. Override the default test URL with
-`TEST_DROP_DATABASE_URL`.
+`TEST_DROPWELL_DATABASE_URL`.
 
 ## Boundaries
 

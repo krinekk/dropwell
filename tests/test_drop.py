@@ -5,19 +5,19 @@ import pytest
 from dotenv import load_dotenv
 from fastapi.testclient import TestClient
 
-from drop.config import get_settings
+from dropwell.config import get_settings
 
 load_dotenv()
 
 TEST_DB_URL = os.getenv(
-    "TEST_DROP_DATABASE_URL",
+    "TEST_DROPWELL_DATABASE_URL",
     "postgresql://postgres:postgres@localhost:5432/drop_test",
 )
 
 
 @pytest.fixture(scope="session", autouse=True)
 def create_test_tables():
-    from drop.db import init_db
+    from dropwell.db import init_db
 
     init_db(TEST_DB_URL)
 
@@ -34,11 +34,11 @@ def clean_table():
 
 @pytest.fixture
 def app_client(monkeypatch):
-    monkeypatch.setenv("DROP_TOKEN", "test-token")
-    monkeypatch.setenv("DROP_DATABASE_URL", TEST_DB_URL)
+    monkeypatch.setenv("DROPWELL_TOKEN", "test-token")
+    monkeypatch.setenv("DROPWELL_DATABASE_URL", TEST_DB_URL)
     get_settings.cache_clear()
 
-    from drop.app import app
+    from dropwell.app import app
 
     with TestClient(app) as client:
         yield client
@@ -51,7 +51,7 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
 def test_settings_parses_cors_origins():
-    from drop.config import Settings
+    from dropwell.config import Settings
 
     settings = Settings(
         token="test-token",

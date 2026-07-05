@@ -1,6 +1,6 @@
 # Contributing
 
-`drop` is primarily a personal infrastructure project, but small focused
+`dropwell` is primarily a personal infrastructure project, but small focused
 improvements are welcome.
 
 ## Principles
@@ -19,7 +19,7 @@ uv run ruff check .
 uv run pytest
 ```
 
-Tests require PostgreSQL. Set `TEST_DROP_DATABASE_URL` when the default local
+Tests require PostgreSQL. Set `TEST_DROPWELL_DATABASE_URL` when the default local
 test database is not available.
 
 ## Pull Requests
@@ -37,4 +37,3 @@ Before opening a pull request:
 uv run ruff check .
 uv run pytest
 ```
-

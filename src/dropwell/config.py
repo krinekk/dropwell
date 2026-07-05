@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="DROP_", env_file=".env")
+    model_config = SettingsConfigDict(env_prefix="DROPWELL_", env_file=".env")
 
     token: str
     database_url: str
@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     @classmethod
     def token_must_not_be_empty(cls, v: str) -> str:
         if not v.strip():
-            raise ValueError("DROP_TOKEN must not be empty")
+            raise ValueError("DROPWELL_TOKEN must not be empty")
         return v
 
     @property

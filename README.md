@@ -1,14 +1,14 @@
-# drop
+# dropwell
 
 [English](README.md) | [Español](README.es.md)
 
-[![CI](https://github.com/ericbosch/drop/actions/workflows/test.yml/badge.svg)](https://github.com/ericbosch/drop/actions/workflows/test.yml)
+[![CI](https://github.com/ericbosch/dropwell/actions/workflows/test.yml/badge.svg)](https://github.com/ericbosch/dropwell/actions/workflows/test.yml)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-005571?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-`drop` is a small authenticated capture API for durable personal notes,
+`dropwell` is a small authenticated capture API for durable personal notes,
 automation events, and low-friction inbox workflows.
 
 It accepts raw UTF-8 payloads at topic-based endpoints, stores them in
@@ -27,7 +27,7 @@ Most personal automation systems need one boring primitive:
 3. review or archive it later
 4. avoid coupling producers to the rest of the system
 
-`drop` is that primitive. Producers only need HTTP and a bearer token. The
+`dropwell` is that primitive. Producers only need HTTP and a bearer token. The
 classification, enrichment, memory, and agent layers can live elsewhere.
 
 ## Status
@@ -54,7 +54,7 @@ Not included:
 
 ## What This Demonstrates
 
-As a portfolio project, `drop` is meant to show a few backend instincts rather
+As a portfolio project, `dropwell` is meant to show a few backend instincts rather
 than a large product surface:
 
 - a small HTTP boundary with explicit authentication
@@ -87,7 +87,7 @@ Statuses:
 
 Default max body size:
 
-- `10 MiB`, configurable with `DROP_MAX_BODY_BYTES`
+- `10 MiB`, configurable with `DROPWELL_MAX_BODY_BYTES`
 
 ## Quickstart
 
@@ -98,12 +98,12 @@ Requirements:
 - PostgreSQL
 
 ```bash
-git clone https://github.com/ericbosch/drop
-cd drop
+git clone https://github.com/ericbosch/dropwell
+cd dropwell
 cp .env.example .env
 docker compose up -d postgres
 uv sync --extra dev
-uv run uvicorn drop.app:app --host 127.0.0.1 --port 9731
+uv run uvicorn dropwell.app:app --host 127.0.0.1 --port 9731
 ```
 
 `docker compose up -d postgres` starts a local PostgreSQL 16 container and
@@ -113,11 +113,11 @@ test suite. No local PostgreSQL install is required.
 Edit `.env` before starting the service:
 
 ```env
-DROP_TOKEN=replace-with-a-long-random-token
-DROP_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/drop
-DROP_PORT=9731
-DROP_MAX_BODY_BYTES=10485760
-DROP_CORS_ORIGINS=http://localhost:3000
+DROPWELL_TOKEN=replace-with-a-long-random-token
+DROPWELL_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/drop
+DROPWELL_PORT=9731
+DROPWELL_MAX_BODY_BYTES=10485760
+DROPWELL_CORS_ORIGINS=http://localhost:3000
 ```
 
 ## Usage
@@ -125,38 +125,38 @@ DROP_CORS_ORIGINS=http://localhost:3000
 Use `http://127.0.0.1:9731` locally or replace it with your own deployment URL.
 
 ```bash
-export DROP_URL="http://127.0.0.1:9731"
-export DROP_TOKEN="replace-with-a-long-random-token"  # match the value in .env
+export DROPWELL_URL="http://127.0.0.1:9731"
+export DROPWELL_TOKEN="replace-with-a-long-random-token"  # match the value in .env
 ```
 
 Health check:
 
 ```bash
-curl "$DROP_URL/health"
+curl "$DROPWELL_URL/health"
 ```
 
 Capture a note:
 
 ```bash
-curl -X POST "$DROP_URL/drop/note" \
-  -H "Authorization: Bearer $DROP_TOKEN" \
+curl -X POST "$DROPWELL_URL/drop/note" \
+  -H "Authorization: Bearer $DROPWELL_TOKEN" \
   --data "remember to review the API boundary"
 ```
 
 Capture JSON as raw body:
 
 ```bash
-curl -X POST "$DROP_URL/drop/github-event" \
-  -H "Authorization: Bearer $DROP_TOKEN" \
+curl -X POST "$DROPWELL_URL/drop/github-event" \
+  -H "Authorization: Bearer $DROPWELL_TOKEN" \
   -H "Content-Type: application/json" \
-  --data '{"action":"push","repo":"drop"}'
+  --data '{"action":"push","repo":"dropwell"}'
 ```
 
 List drops:
 
 ```bash
-curl "$DROP_URL/drops?limit=10" \
-  -H "Authorization: Bearer $DROP_TOKEN"
+curl "$DROPWELL_URL/drops?limit=10" \
+  -H "Authorization: Bearer $DROPWELL_TOKEN"
 ```
 
 Example list response:
@@ -177,15 +177,15 @@ Example list response:
 Filter by topic or status:
 
 ```bash
-curl "$DROP_URL/drops?topic=note&status=inbound" \
-  -H "Authorization: Bearer $DROP_TOKEN"
+curl "$DROPWELL_URL/drops?topic=note&status=inbound" \
+  -H "Authorization: Bearer $DROPWELL_TOKEN"
 ```
 
 Archive a drop:
 
 ```bash
-curl -X PATCH "$DROP_URL/drops/<id>" \
-  -H "Authorization: Bearer $DROP_TOKEN" \
+curl -X PATCH "$DROPWELL_URL/drops/<id>" \
+  -H "Authorization: Bearer $DROPWELL_TOKEN" \
   -H "Content-Type: application/json" \
   --data '{"status":"archived"}'
 ```
@@ -193,8 +193,8 @@ curl -X PATCH "$DROP_URL/drops/<id>" \
 Update body text:
 
 ```bash
-curl -X PATCH "$DROP_URL/drops/<id>" \
-  -H "Authorization: Bearer $DROP_TOKEN" \
+curl -X PATCH "$DROPWELL_URL/drops/<id>" \
+  -H "Authorization: Bearer $DROPWELL_TOKEN" \
   -H "Content-Type: application/json" \
   --data '{"body":"cleaned up note body"}'
 ```
@@ -202,8 +202,8 @@ curl -X PATCH "$DROP_URL/drops/<id>" \
 Delete a drop:
 
 ```bash
-curl -X DELETE "$DROP_URL/drops/<id>" \
-  -H "Authorization: Bearer $DROP_TOKEN"
+curl -X DELETE "$DROPWELL_URL/drops/<id>" \
+  -H "Authorization: Bearer $DROPWELL_TOKEN"
 ```
 
 Successful capture response:
@@ -221,12 +221,12 @@ Successful capture response:
 
 | Variable | Required | Default | Description |
 |---|---:|---|---|
-| `DROP_TOKEN` | Yes | - | Bearer token for all non-health endpoints |
-| `DROP_DATABASE_URL` | Yes | - | PostgreSQL connection string |
-| `DROP_HOST` | No | `127.0.0.1` | Host used by local process helpers |
-| `DROP_PORT` | No | `9731` | Port used by local process helpers |
-| `DROP_MAX_BODY_BYTES` | No | `10485760` | Maximum accepted request body size |
-| `DROP_CORS_ORIGINS` | No | empty | Comma-separated browser origins allowed by CORS |
+| `DROPWELL_TOKEN` | Yes | - | Bearer token for all non-health endpoints |
+| `DROPWELL_DATABASE_URL` | Yes | - | PostgreSQL connection string |
+| `DROPWELL_HOST` | No | `127.0.0.1` | Host used by local process helpers |
+| `DROPWELL_PORT` | No | `9731` | Port used by local process helpers |
+| `DROPWELL_MAX_BODY_BYTES` | No | `10485760` | Maximum accepted request body size |
+| `DROPWELL_CORS_ORIGINS` | No | empty | Comma-separated browser origins allowed by CORS |
 
 ## Development
 
@@ -239,7 +239,7 @@ uv sync --extra dev
 Run the API:
 
 ```bash
-uv run uvicorn drop.app:app --host 127.0.0.1 --port 9731 --reload
+uv run uvicorn dropwell.app:app --host 127.0.0.1 --port 9731 --reload
 ```
 
 Run linting:
@@ -264,7 +264,7 @@ postgresql://postgres:postgres@localhost:5432/drop_test
 automatically. Override with:
 
 ```bash
-export TEST_DROP_DATABASE_URL="postgresql://user:password@host:5432/drop_test"
+export TEST_DROPWELL_DATABASE_URL="postgresql://user:password@host:5432/drop_test"
 uv run pytest
 ```
 
@@ -273,22 +273,22 @@ uv run pytest
 The repo includes two deployment-oriented paths:
 
 - `api/index.py` for Vercel-style serverless deployment through Mangum.
-- `deploy/drop.service` for a local user `systemd` service.
+- `deploy/dropwell.service` for a local user `systemd` service.
 
 Set these environment variables in the target deployment environment:
 
 ```bash
-DROP_TOKEN=<long-random-token>
-DROP_DATABASE_URL=<postgres-url>
-DROP_MAX_BODY_BYTES=10485760
-DROP_CORS_ORIGINS=https://your-ui.example.com
+DROPWELL_TOKEN=<long-random-token>
+DROPWELL_DATABASE_URL=<postgres-url>
+DROPWELL_MAX_BODY_BYTES=10485760
+DROPWELL_CORS_ORIGINS=https://your-ui.example.com
 ```
 
 For Vercel:
 
 ```bash
-vercel env add DROP_TOKEN production
-vercel env add DROP_DATABASE_URL production
+vercel env add DROPWELL_TOKEN production
+vercel env add DROPWELL_DATABASE_URL production
 vercel --prod
 ```
 
@@ -331,10 +331,10 @@ Design choices:
 
 ## Relationship To KOS
 
-`drop` can be used as an ingestion primitive for KOS or other personal
+`dropwell` can be used as an ingestion primitive for KOS or other personal
 automation systems, but it is intentionally independent.
 
-KOS is an experimental long-term personal project. `drop` should not imply that
+KOS is an experimental long-term personal project. `dropwell` should not imply that
 KOS is a commercial product, employer project, or market-ready system.
 
 ## Roadmap
@@ -349,7 +349,7 @@ Possible next steps:
 
 Non-goals unless the project direction changes:
 
-- Turning `drop` into a SaaS
+- Turning `dropwell` into a SaaS
 - Adding AI summarization inside the capture API
 - Building a social or collaborative inbox
 - Replacing a full task manager

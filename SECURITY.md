@@ -1,6 +1,6 @@
 # Security Policy
 
-`drop` is a small personal capture API. Treat every deployment as private
+`dropwell` is a small personal capture API. Treat every deployment as private
 infrastructure unless you have explicitly designed and reviewed it for public
 exposure.
 
@@ -18,8 +18,8 @@ URLs, private hostnames, or captured payloads in public issues.
 
 Before exposing an instance beyond localhost:
 
-- Use a long random `DROP_TOKEN`.
-- Store `DROP_TOKEN` and `DROP_DATABASE_URL` only in the deployment environment.
+- Use a long random `DROPWELL_TOKEN`.
+- Store `DROPWELL_TOKEN` and `DROPWELL_DATABASE_URL` only in the deployment environment.
 - Confirm `.env`, database files, logs, and provider metadata are not tracked.
 - Use HTTPS at the public boundary.
 - Restrict database access to the minimum required network surface.
@@ -30,7 +30,7 @@ Before exposing an instance beyond localhost:
 
 ## Known Limits
 
-- `drop` uses one bearer token for all non-health endpoints.
+- `dropwell` uses one bearer token for all non-health endpoints.
 - There are no per-topic permissions.
 - There is no built-in rate limiting.
 - There is no built-in payload encryption layer.
