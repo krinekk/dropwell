@@ -1,0 +1,366 @@
+# drop
+
+[English](README.md) | [Español](README.es.md)
+
+[![CI](https://github.com/ericbosch/drop/actions/workflows/test.yml/badge.svg)](https://github.com/ericbosch/drop/actions/workflows/test.yml)
+[![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-005571?logo=fastapi)](https://fastapi.tiangolo.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
+`drop` is a small authenticated capture API for durable personal notes,
+automation events, and low-friction inbox workflows.
+
+It accepts raw UTF-8 payloads at topic-based endpoints, stores them in
+PostgreSQL, and exposes a minimal review surface for listing, updating,
+archiving, and deleting captured drops. It is intentionally boring: no feed
+ranking, no AI claims, no background magic, no product theater.
+
+> Personal project. Not affiliated with my employer.
+
+## Why It Exists
+
+Most personal automation systems need one boring primitive:
+
+1. receive something quickly
+2. store it durably
+3. review or archive it later
+4. avoid coupling producers to the rest of the system
+
+`drop` is that primitive. Producers only need HTTP and a bearer token. The
+classification, enrichment, memory, and agent layers can live elsewhere.
+
+## Status
+
+Current state:
+
+- Authenticated write endpoint: `POST /drop/{topic}`
+- Authenticated read endpoint: `GET /drops`
+- Authenticated update endpoint: `PATCH /drops/{id}`
+- Authenticated delete endpoint: `DELETE /drops/{id}`
+- PostgreSQL persistence
+- CI with ruff and pytest
+- Vercel serverless adapter
+- Optional local `systemd` service example
+
+Not included:
+
+- Multi-user accounts
+- OAuth
+- Public unauthenticated ingestion
+- UI/dashboard
+- AI processing
+- Background workers
+
+## What This Demonstrates
+
+As a portfolio project, `drop` is meant to show a few backend instincts rather
+than a large product surface:
+
+- a small HTTP boundary with explicit authentication
+- PostgreSQL persistence with focused data access helpers
+- input validation and clear request limits
+- CI against a real PostgreSQL service
+- operational documentation for local and serverless deployment
+- security notes that state trade-offs instead of hiding them
+
+## API
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `GET` | `/health` | No | Health check and version |
+| `POST` | `/drop/{topic}` | Yes | Store a raw UTF-8 payload under a topic |
+| `GET` | `/drops` | Yes | List captured drops |
+| `PATCH` | `/drops/{id}` | Yes | Update `status` and/or `body` |
+| `DELETE` | `/drops/{id}` | Yes | Delete a drop |
+
+Topics must match:
+
+```text
+[a-z0-9][a-z0-9-]{0,63}
+```
+
+Statuses:
+
+- `inbound`
+- `archived`
+
+Default max body size:
+
+- `10 MiB`, configurable with `DROP_MAX_BODY_BYTES`
+
+## Quickstart
+
+Requirements:
+
+- Python 3.12+
+- `uv`
+- PostgreSQL
+
+```bash
+git clone https://github.com/ericbosch/drop
+cd drop
+cp .env.example .env
+docker compose up -d postgres
+uv sync --extra dev
+uv run uvicorn drop.app:app --host 127.0.0.1 --port 9731
+```
+
+`docker compose up -d postgres` starts a local PostgreSQL 16 container and
+creates both the `drop` and `drop_test` databases used by the app and the
+test suite. No local PostgreSQL install is required.
+
+Edit `.env` before starting the service:
+
+```env
+DROP_TOKEN=replace-with-a-long-random-token
+DROP_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/drop
+DROP_PORT=9731
+DROP_MAX_BODY_BYTES=10485760
+DROP_CORS_ORIGINS=http://localhost:3000
+```
+
+## Usage
+
+Use `http://127.0.0.1:9731` locally or replace it with your own deployment URL.
+
+```bash
+export DROP_URL="http://127.0.0.1:9731"
+export DROP_TOKEN="replace-with-a-long-random-token"  # match the value in .env
+```
+
+Health check:
+
+```bash
+curl "$DROP_URL/health"
+```
+
+Capture a note:
+
+```bash
+curl -X POST "$DROP_URL/drop/note" \
+  -H "Authorization: Bearer $DROP_TOKEN" \
+  --data "remember to review the API boundary"
+```
+
+Capture JSON as raw body:
+
+```bash
+curl -X POST "$DROP_URL/drop/github-event" \
+  -H "Authorization: Bearer $DROP_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"action":"push","repo":"drop"}'
+```
+
+List drops:
+
+```bash
+curl "$DROP_URL/drops?limit=10" \
+  -H "Authorization: Bearer $DROP_TOKEN"
+```
+
+Example list response:
+
+```json
+[
+  {
+    "id": "65cc274b-a368-455b-a6c1-cf3a3f9d5b81",
+    "topic": "note",
+    "body": "remember to review the API boundary",
+    "received_at": "2026-05-28T00:00:00+00:00",
+    "updated_at": "2026-05-28T00:00:00+00:00",
+    "status": "inbound"
+  }
+]
+```
+
+Filter by topic or status:
+
+```bash
+curl "$DROP_URL/drops?topic=note&status=inbound" \
+  -H "Authorization: Bearer $DROP_TOKEN"
+```
+
+Archive a drop:
+
+```bash
+curl -X PATCH "$DROP_URL/drops/<id>" \
+  -H "Authorization: Bearer $DROP_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"status":"archived"}'
+```
+
+Update body text:
+
+```bash
+curl -X PATCH "$DROP_URL/drops/<id>" \
+  -H "Authorization: Bearer $DROP_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"body":"cleaned up note body"}'
+```
+
+Delete a drop:
+
+```bash
+curl -X DELETE "$DROP_URL/drops/<id>" \
+  -H "Authorization: Bearer $DROP_TOKEN"
+```
+
+Successful capture response:
+
+```json
+{
+  "id": "65cc274b-a368-455b-a6c1-cf3a3f9d5b81",
+  "topic": "note",
+  "received_at": "2026-05-28T00:00:00+00:00",
+  "updated_at": "2026-05-28T00:00:00+00:00"
+}
+```
+
+## Configuration
+
+| Variable | Required | Default | Description |
+|---|---:|---|---|
+| `DROP_TOKEN` | Yes | - | Bearer token for all non-health endpoints |
+| `DROP_DATABASE_URL` | Yes | - | PostgreSQL connection string |
+| `DROP_HOST` | No | `127.0.0.1` | Host used by local process helpers |
+| `DROP_PORT` | No | `9731` | Port used by local process helpers |
+| `DROP_MAX_BODY_BYTES` | No | `10485760` | Maximum accepted request body size |
+| `DROP_CORS_ORIGINS` | No | empty | Comma-separated browser origins allowed by CORS |
+
+## Development
+
+Install dependencies:
+
+```bash
+uv sync --extra dev
+```
+
+Run the API:
+
+```bash
+uv run uvicorn drop.app:app --host 127.0.0.1 --port 9731 --reload
+```
+
+Run linting:
+
+```bash
+uv run ruff check .
+```
+
+Run tests:
+
+```bash
+uv run pytest
+```
+
+Tests use PostgreSQL. By default they expect:
+
+```text
+postgresql://postgres:postgres@localhost:5432/drop_test
+```
+
+`docker compose up -d postgres` (see Quickstart) provisions this database
+automatically. Override with:
+
+```bash
+export TEST_DROP_DATABASE_URL="postgresql://user:password@host:5432/drop_test"
+uv run pytest
+```
+
+## Deployment
+
+The repo includes two deployment-oriented paths:
+
+- `api/index.py` for Vercel-style serverless deployment through Mangum.
+- `deploy/drop.service` for a local user `systemd` service.
+
+Set these environment variables in the target deployment environment:
+
+```bash
+DROP_TOKEN=<long-random-token>
+DROP_DATABASE_URL=<postgres-url>
+DROP_MAX_BODY_BYTES=10485760
+DROP_CORS_ORIGINS=https://your-ui.example.com
+```
+
+For Vercel:
+
+```bash
+vercel env add DROP_TOKEN production
+vercel env add DROP_DATABASE_URL production
+vercel --prod
+```
+
+Use your own deployment URL in examples and docs. Do not commit real tokens,
+database URLs, local hostnames, or production endpoints.
+
+## Architecture
+
+```text
+producer scripts / webhooks / tools
+        |
+        | HTTP + bearer token
+        v
+FastAPI app
+        |
+        v
+PostgreSQL table: drop
+        |
+        v
+review / archive / downstream automation
+```
+
+Design choices:
+
+- Use one simple authenticated HTTP boundary.
+- Store raw UTF-8 body text without trying to infer meaning.
+- Keep producer integration cheap.
+- Keep downstream enrichment outside this service.
+- Prefer boring operational primitives over clever automation.
+
+## Security And Privacy
+
+- All non-health endpoints require a bearer token.
+- The token must be provided through environment configuration.
+- The project does not include account management or per-topic permissions.
+- Payloads are stored as raw text. Do not send secrets unless your deployment,
+  database, backups, and retention policy are designed for that.
+- Keep `.env`, database files, logs, and deployment metadata out of Git.
+- Review `SECURITY.md` before exposing an instance beyond localhost.
+
+## Relationship To KOS
+
+`drop` can be used as an ingestion primitive for KOS or other personal
+automation systems, but it is intentionally independent.
+
+KOS is an experimental long-term personal project. `drop` should not imply that
+KOS is a commercial product, employer project, or market-ready system.
+
+## Roadmap
+
+Possible next steps:
+
+- Optional pagination cursor
+- Optional topic allowlist
+- Basic metrics endpoint
+- Minimal OpenAPI examples
+- More explicit retention/export story
+
+Non-goals unless the project direction changes:
+
+- Turning `drop` into a SaaS
+- Adding AI summarization inside the capture API
+- Building a social or collaborative inbox
+- Replacing a full task manager
+
+## Contributing
+
+This is primarily a personal infrastructure project, but issues and small pull
+requests are welcome if they keep the project simple, secure, and boring.
+
+See `CONTRIBUTING.md`.
+
+## License
+
+MIT. See `LICENSE`.

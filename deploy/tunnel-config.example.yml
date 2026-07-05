@@ -1,0 +1,14 @@
+# Tailscale Funnel example - expose drop through HTTPS
+#
+# Enable:
+#   tailscale funnel --bg 9731
+#
+# Disable:
+#   tailscale funnel --https=443 off
+#
+# Resulting public URL:
+#   https://<hostname>.ts.net/drop/{topic}
+#   https://<hostname>.ts.net/health
+#
+# Check status:
+#   tailscale funnel status

@@ -1,0 +1,45 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: drop_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DROP_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/drop_test
+      TEST_DROP_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/drop_test
+      DROP_TOKEN: ci-test-token
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v3
+
+      - run: uv sync --frozen --extra dev
+
+      - run: uv run ruff check .
+
+      - run: uv run pytest
