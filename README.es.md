@@ -2,7 +2,7 @@
 
 [English](README.md) | [Español](README.es.md)
 
-[![CI](https://github.com/ericbosch/dropwell/actions/workflows/test.yml/badge.svg)](https://github.com/ericbosch/dropwell/actions/workflows/test.yml)
+[![CI](https://github.com/krinekk/dropwell/actions/workflows/test.yml/badge.svg)](https://github.com/krinekk/dropwell/actions/workflows/test.yml)
 [![Python](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-005571?logo=fastapi)](https://fastapi.tiangolo.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
@@ -99,7 +99,7 @@ Requisitos:
 - PostgreSQL
 
 ```bash
-git clone https://github.com/ericbosch/dropwell
+git clone https://github.com/krinekk/dropwell
 cd dropwell
 cp .env.example .env
 docker compose up -d postgres
@@ -127,7 +127,7 @@ Para levantar app y base de datos en contenedores, sin instalar nada de
 Python en local:
 
 ```bash
-git clone https://github.com/ericbosch/dropwell
+git clone https://github.com/krinekk/dropwell
 cd dropwell
 cp .env.example .env
 docker compose up --build
