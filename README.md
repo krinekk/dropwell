@@ -125,6 +125,29 @@ DROPWELL_MAX_BODY_BYTES=10485760
 DROPWELL_CORS_ORIGINS=http://localhost:3000
 ```
 
+### All-in-Docker
+
+To run both the app and the database in containers, with no local Python
+setup required:
+
+```bash
+git clone https://github.com/ericbosch/dropwell
+cd dropwell
+cp .env.example .env
+docker compose up --build
+```
+
+This builds the `app` image (multi-stage, `uv`-managed, reproducible via
+`uv.lock`) and starts it alongside `postgres` on a dedicated Docker network.
+The app connects to `postgres` using its service name, overriding the
+`DROPWELL_DATABASE_URL` host from `.env`. The app port is published to the
+host as `127.0.0.1:9731` only, not `0.0.0.0`. Stop and remove everything,
+including the database volume, with:
+
+```bash
+docker compose down -v
+```
+
 ## Usage
 
 Use `http://127.0.0.1:9731` locally or replace it with your own deployment URL.

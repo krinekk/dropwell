@@ -15,6 +15,30 @@ services:
       interval: 2s
       timeout: 2s
       retries: 15
+    networks:
+      - dropwell-net
+
+  app:
+    build: .
+    env_file:
+      - .env
+    environment:
+      DROPWELL_DATABASE_URL: postgresql://postgres:postgres@postgres:5432/drop
+    ports:
+      - "127.0.0.1:9731:9731"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - dropwell-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9731/health')"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+networks:
+  dropwell-net:
 
 volumes:
   drop-postgres-data:
