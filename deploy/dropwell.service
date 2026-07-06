@@ -6,7 +6,7 @@ After=network.target
 Type=simple
 WorkingDirectory=/opt/dropwell
 EnvironmentFile=/opt/dropwell/.env
-ExecStart=/opt/drop/.venv/bin/uvicorn dropwell.app:app --host 127.0.0.1 --port 9731
+ExecStart=/opt/dropwell/.venv/bin/uvicorn dropwell.app:app --host 127.0.0.1 --port 9731
 Restart=on-failure
 RestartSec=5
 

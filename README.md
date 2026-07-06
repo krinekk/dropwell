@@ -110,6 +110,11 @@ uv run uvicorn dropwell.app:app --host 127.0.0.1 --port 9731
 creates both the `drop` and `drop_test` databases used by the app and the
 test suite. No local PostgreSQL install is required.
 
+If port `5432` is already taken by another PostgreSQL instance on your host,
+remap it: change the `5432:5432` port mapping in `docker-compose.yml` (e.g. to
+`15432:5432`) and update the port in the `*_DATABASE_URL` values in `.env`
+to match.
+
 Edit `.env` before starting the service:
 
 ```env
