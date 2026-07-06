@@ -8,15 +8,14 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-`dropwell` is a small authenticated capture API for durable personal notes,
-automation events, and low-friction inbox workflows.
+`dropwell` is an authenticated capture API for durable notes, automation
+events, and low-friction inbox workflows.
 
-It accepts raw UTF-8 payloads at topic-based endpoints, stores them in
-PostgreSQL, and exposes a minimal review surface for listing, updating,
-archiving, and deleting captured drops. It is intentionally boring: no feed
-ranking, no AI claims, no background magic, no product theater.
-
-> Personal project. Not affiliated with my employer.
+It accepts raw UTF-8 payloads at topic-based endpoints, stores them durably in
+PostgreSQL, and exposes a focused review surface for listing, updating,
+archiving, and deleting captured drops. It is boring on purpose: no feed
+ranking, no AI claims, no background magic — a primitive you rely on and build
+the interesting parts on top of.
 
 ## Why It Exists
 
@@ -30,39 +29,28 @@ Most personal automation systems need one boring primitive:
 `dropwell` is that primitive. Producers only need HTTP and a bearer token. The
 classification, enrichment, memory, and agent layers can live elsewhere.
 
-## Status
-
-Current state:
+## Features
 
 - Authenticated write endpoint: `POST /drop/{topic}`
 - Authenticated read endpoint: `GET /drops`
 - Authenticated update endpoint: `PATCH /drops/{id}`
 - Authenticated delete endpoint: `DELETE /drops/{id}`
 - PostgreSQL persistence
-- CI with ruff and pytest
+- CI with ruff and pytest against a real PostgreSQL service
 - Vercel serverless adapter
 - Optional local `systemd` service example
 
-Not included:
+## Non-goals
 
-- Multi-user accounts
-- OAuth
+dropwell stays deliberately focused. By design it does not do:
+
+- Multi-user accounts or OAuth
 - Public unauthenticated ingestion
-- UI/dashboard
-- AI processing
-- Background workers
+- UI / dashboard
+- AI processing or background workers
 
-## What This Demonstrates
-
-As a portfolio project, `dropwell` is meant to show a few backend instincts rather
-than a large product surface:
-
-- a small HTTP boundary with explicit authentication
-- PostgreSQL persistence with focused data access helpers
-- input validation and clear request limits
-- CI against a real PostgreSQL service
-- operational documentation for local and serverless deployment
-- security notes that state trade-offs instead of hiding them
+Classification, enrichment, memory, and agent layers belong elsewhere —
+dropwell is the primitive they build on.
 
 ## API
 
@@ -391,4 +379,4 @@ See `CONTRIBUTING.md`.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See `LICENSE`. Project ownership and affiliation: see [`DISCLAIMER.md`](DISCLAIMER.md).

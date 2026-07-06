@@ -8,15 +8,14 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Licencia: MIT](https://img.shields.io/badge/licencia-MIT-green.svg)](LICENSE)
 
-`dropwell` es una pequeña API autenticada para capturar notas personales, eventos de
-automatización y flujos de inbox de baja fricción.
+`dropwell` es una API autenticada para capturar notas, eventos de automatización
+y flujos de inbox de baja fricción.
 
-Acepta payloads UTF-8 en endpoints por tema, los guarda en PostgreSQL y expone
-una superficie mínima para listar, actualizar, archivar y borrar capturas. Es
-deliberadamente aburrida: sin ranking de feed, sin claims de IA, sin magia en
-segundo plano, sin teatro de producto.
-
-> Proyecto personal. No afiliado con mi empleador.
+Acepta payloads UTF-8 en endpoints por tema, los guarda de forma durable en
+PostgreSQL y expone una superficie enfocada para listar, actualizar, archivar y
+borrar capturas. Es aburrida a propósito: sin ranking de feed, sin claims de IA,
+sin magia en segundo plano — una primitiva en la que confías para construir las
+partes interesantes encima.
 
 ## Por Qué Existe
 
@@ -31,39 +30,28 @@ Muchos sistemas de automatización personal necesitan una primitiva aburrida:
 La clasificación, enriquecimiento, memoria y capas de agentes pueden vivir en
 otro sitio.
 
-## Estado
-
-Estado actual:
+## Características
 
 - Endpoint autenticado de escritura: `POST /drop/{topic}`
 - Endpoint autenticado de lectura: `GET /drops`
 - Endpoint autenticado de actualización: `PATCH /drops/{id}`
 - Endpoint autenticado de borrado: `DELETE /drops/{id}`
 - Persistencia en PostgreSQL
-- CI con ruff y pytest
+- CI con ruff y pytest contra un servicio PostgreSQL real
 - Adaptador serverless para Vercel
 - Ejemplo opcional de servicio local con `systemd`
 
-No incluido:
+## No-objetivos
 
-- Cuentas multiusuario
-- OAuth
+dropwell se mantiene deliberadamente enfocada. Por diseño no hace:
+
+- Cuentas multiusuario ni OAuth
 - Ingesta pública sin autenticación
-- UI/dashboard
-- Procesamiento con IA
-- Workers en segundo plano
+- UI / dashboard
+- Procesamiento con IA ni workers en segundo plano
 
-## Qué Demuestra
-
-Como proyecto de portfolio, `dropwell` busca demostrar algunos instintos backend
-antes que una gran superficie de producto:
-
-- una frontera HTTP pequeña con autenticación explícita
-- persistencia PostgreSQL con helpers de acceso a datos enfocados
-- validación de entrada y límites de request claros
-- CI contra un servicio PostgreSQL real
-- documentación operativa para despliegue local y serverless
-- notas de seguridad que explican los trade-offs en lugar de ocultarlos
+La clasificación, enriquecimiento, memoria y capas de agentes viven en otro
+sitio — dropwell es la primitiva sobre la que se construyen.
 
 ## API
 
@@ -393,4 +381,4 @@ Ver `CONTRIBUTING.md`.
 
 ## Licencia
 
-MIT. Ver `LICENSE`.
+MIT. Ver `LICENSE`. Propiedad del proyecto y afiliación: ver [`DISCLAIMER.md`](DISCLAIMER.md).
