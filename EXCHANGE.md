@@ -9,7 +9,8 @@ single-use delivery URL whenever GPT must read one.
   by short id; it never returns delivery credentials.
 - A **delivery token** is a 256-bit capability bound to one thread and role
   `gpt`. It is usable by exactly one `GET` and has a short TTL (15 minutes by
-  default).
+  default). The role is inferred by the server, so the delivery URL is a clean
+  `/exchange/<token>` path.
 - Redeeming a delivery atomically marks it consumed before returning the thread
   snapshot. Replays and expired deliveries receive `410 Gone`.
 - Delivery URLs are read-only. `POST /exchange/...` always returns `404`.
@@ -48,6 +49,11 @@ uv run python exchange-cli.py deliver --sid <thread-sid> \
 ```
 
 The UI is available at `/ui` and lists durable threads without delivery tokens.
+
+For constrained GPT browsers, paste the delivery URL as a literal, standalone
+user message and ask it to perform one GET. Do not make GPT construct or alter
+the URL: some browser sandboxes refuse newly constructed capability URLs before
+they reach the server.
 
 ## KOS drop envelope
 

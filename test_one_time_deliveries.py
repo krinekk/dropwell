@@ -302,7 +302,7 @@ class OneTimeDeliveryHttpTests(unittest.TestCase):
             connection.close()
 
     def test_get_consumes_delivery_and_post_cannot_write(self):
-        path = f"/exchange/{self.token}?role=gpt"
+        path = f"/exchange/{self.token}"
 
         status, body = self.request("GET", path)
         self.assertEqual(status, 200)

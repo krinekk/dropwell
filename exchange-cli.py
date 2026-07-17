@@ -50,7 +50,7 @@ def health_check(port: int) -> bool:
 
 
 def _delivery_url(base_url: str, token: str) -> str:
-    return f"{base_url.rstrip('/')}/exchange/{token}?role=gpt"
+    return f"{base_url.rstrip('/')}/exchange/{token}"
 
 
 def main():

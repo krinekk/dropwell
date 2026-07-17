@@ -8,10 +8,10 @@ Usage:
                                  [--ntfy-topic <topic>] [--ntfy-token <token>]
 
 Delivery URL format:
-  https://drop.krinekk.dev/exchange/<one-time-token>?role=gpt
+  https://drop.krinekk.dev/exchange/<one-time-token>
 
 API:
-  GET  /exchange/<one-time-token>?role=gpt  - Redeem one thread snapshot
+  GET  /exchange/<one-time-token>  - Redeem one GPT thread snapshot
   POST /ui/api/send                         - Append as the authenticated UI user
   GET  /health                           - Health check
 """
@@ -624,7 +624,9 @@ class ExchangeHandler(BaseHTTPRequestHandler):
         if len(path_parts) == 2 and path_parts[0] == "exchange":
             token = path_parts[1]
             query = parse_qs(parsed.query)
-            role = query.get("role", [None])[0]
+            # The sole delivery role is GPT. Keeping it out of the capability
+            # URL makes the literal handoff compatible with constrained readers.
+            role = query.get("role", ["gpt"])[0]
             assert self.store is not None
             thread, error = self.store.redeem_delivery(token, role or "")
             if error:
