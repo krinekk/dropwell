@@ -7,158 +7,356 @@ Usage:
   python3 claude-gpt-exchange.py [--port 9741] [--data-dir ./gpt-exchange-data]
                                  [--ntfy-topic <topic>] [--ntfy-token <token>]
 
-Session URL format:
-  http://localhost:9741/exchange/<session-token>?role=claude
-  http://localhost:9741/exchange/<session-token>?role=gpt
+Delivery URL format:
+  https://drop.krinekk.dev/exchange/<one-time-token>?role=gpt
 
 API:
-  GET  /exchange/<token>?role=<role>     - List messages (optional role filter)
-  POST /exchange/<token>?role=<role>     - Append message (Bearer auth)
+  GET  /exchange/<one-time-token>?role=gpt  - Redeem one thread snapshot
+  POST /ui/api/send                         - Append as the authenticated UI user
   GET  /health                           - Health check
 """
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
 import secrets
 import sys
 import urllib.request
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock
 from urllib.parse import parse_qs, urlparse
 
 
 class ExchangeStore:
-    """Thread-safe store for exchange messages, backed by JSON files."""
+    """Durable threads plus one-time, read-only delivery capabilities."""
 
     def __init__(self, data_dir: Path):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.lock = Lock()
+        self.lock_path = self.data_dir / ".exchange.lock"
+        self.lock_path.touch(exist_ok=True)
+        os.chmod(self.lock_path, 0o600)
 
-    def _session_file(self, token: str) -> Path:
-        return self.data_dir / f"{token}.json"
-
-    def create_session(self, ttl_minutes: int = 120) -> tuple[str, str]:
-        """Create a new session, return (token, expires_at)."""
-        token = secrets.token_hex(32)  # 64-char hex = 256 bits
-        expires_at = (
-            datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
-        ).isoformat()
-
-        session = {
-            "token": token,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "expires_at": expires_at,
-            "messages": [],
-        }
-
+    @contextmanager
+    def _locked(self):
+        """Serialize mutations across threads and independent server processes."""
         with self.lock:
-            path = self._session_file(token)
-            with open(path, "w") as f:
-                json.dump(session, f, indent=2)
-            os.chmod(path, 0o600)
+            with open(self.lock_path, "a+") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
-        return token, expires_at
+    def _thread_file(self, thread_id: str) -> Path:
+        return self.data_dir / f"thread_{thread_id}.json"
 
-    def get_messages(self, token: str, role: str | None = None) -> list[dict] | None:
-        """Get messages for a session, optionally filtered by role."""
-        with self.lock:
-            path = self._session_file(token)
-            if not path.exists():
-                return None
+    def _delivery_file(self, token: str) -> Path:
+        return self.data_dir / f"delivery_{token}.json"
 
+    @staticmethod
+    def _read_json(path: Path) -> dict | None:
+        try:
             with open(path) as f:
-                session = json.load(f)
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
 
-            # Check expiration
-            expires = datetime.fromisoformat(session["expires_at"])
-            if expires < datetime.now(timezone.utc):
+    @staticmethod
+    def _write_json(path: Path, data: dict) -> None:
+        temp_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+        with open(temp_path, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, path)
+
+    def create_thread(self) -> str:
+        """Create a durable exchange thread; it has no delivery credential."""
+        with self._locked():
+            while True:
+                thread_id = secrets.token_hex(16)
+                path = self._thread_file(thread_id)
+                if not path.exists():
+                    break
+            self._write_json(
+                path,
+                {
+                    "thread_id": thread_id,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                    "messages": [],
+                },
+            )
+        return thread_id
+
+    def get_thread(self, thread_id: str) -> dict | None:
+        """Return a durable thread without any delivery credentials."""
+        with self._locked():
+            thread = self._read_json(self._thread_file(thread_id))
+            return thread
+
+    def add_message(self, thread_id: str, role: str, body: str) -> dict | None:
+        """Append a message to a durable thread."""
+        with self._locked():
+            path = self._thread_file(thread_id)
+            thread = self._read_json(path)
+            if thread is None:
                 return None
-
-            messages = session["messages"]
-            if role:
-                messages = [m for m in messages if m.get("role") == role]
-            return messages
-
-    def add_message(self, token: str, role: str, body: str) -> dict | None:
-        """Add a message. Returns message dict or None if expired/invalid."""
-        with self.lock:
-            path = self._session_file(token)
-            if not path.exists():
-                return None
-
-            with open(path) as f:
-                session = json.load(f)
-
-            # Check expiration
-            expires = datetime.fromisoformat(session["expires_at"])
-            if expires < datetime.now(timezone.utc):
-                return None
-
             message = {
                 "id": secrets.token_hex(12),
                 "role": role,
                 "body": body,
                 "posted_at": datetime.now(timezone.utc).isoformat(),
             }
-            session["messages"].append(message)
-
-            with open(path, "w") as f:
-                json.dump(session, f, indent=2)
-
+            thread["messages"].append(message)
+            self._write_json(path, thread)
             return message
 
-    def list_sessions(self) -> list[dict]:
-        """List sessions with short ids (no full tokens)."""
-        sessions = []
-        with self.lock:
-            for path in sorted(self.data_dir.glob("*.json")):
-                try:
-                    with open(path) as f:
-                        session = json.load(f)
-                    expires = datetime.fromisoformat(session["expires_at"])
-                    sessions.append(
-                        {
-                            "sid": session["token"][:12],
-                            "created_at": session["created_at"],
-                            "expires_at": session["expires_at"],
-                            "expired": expires < datetime.now(timezone.utc),
-                            "message_count": len(session.get("messages", [])),
-                        }
-                    )
-                except (json.JSONDecodeError, KeyError, ValueError):
+    def issue_delivery(
+        self, thread_id: str, role: str = "gpt", ttl_minutes: int = 15
+    ) -> tuple[str, str]:
+        """Issue a single-use, read-only delivery capability for a thread."""
+        if role != "gpt":
+            raise ValueError("only the gpt delivery role is supported")
+        with self._locked():
+            if self._read_json(self._thread_file(thread_id)) is None:
+                raise ValueError("unknown thread")
+            token, expires_at = self._issue_delivery_locked(
+                thread_id, role, ttl_minutes
+            )
+        return token, expires_at
+
+    def accept_gpt_drop(
+        self, thread_id: str, drop_id: str, body: str, ttl_minutes: int = 15
+    ) -> tuple[dict | None, tuple[str, str] | None, bool]:
+        """Mirror one KOS drop and issue the next delivery exactly once."""
+        with self._locked():
+            path = self._thread_file(thread_id)
+            thread = self._read_json(path)
+            if thread is None:
+                raise ValueError("unknown thread")
+            processed = thread.setdefault("processed_drop_ids", [])
+            if drop_id in processed:
+                delivery = self._find_or_recover_drop_delivery_locked(
+                    thread_id, drop_id, ttl_minutes
+                )
+                return None, delivery, True
+            message = {
+                "id": secrets.token_hex(12),
+                "role": "gpt",
+                "body": body,
+                "posted_at": datetime.now(timezone.utc).isoformat(),
+            }
+            thread["messages"].append(message)
+            processed.append(drop_id)
+            self._write_json(path, thread)
+            token, expires_at = self._issue_delivery_locked(
+                thread_id, "gpt", ttl_minutes, source_drop_id=drop_id
+            )
+            return message, (token, expires_at), False
+
+    def redeem_delivery(
+        self, token: str, role: str
+    ) -> tuple[dict | None, str | None]:
+        """Atomically consume a delivery capability and return its thread."""
+        with self._locked():
+            path = self._delivery_file(token)
+            delivery = self._read_json(path)
+            if delivery is None:
+                return None, "unknown"
+            if role != delivery.get("role"):
+                return None, "role"
+            if delivery.get("consumed_at") is not None:
+                return None, "consumed"
+            expires_at = datetime.fromisoformat(delivery["expires_at"])
+            if expires_at < datetime.now(timezone.utc):
+                return None, "expired"
+            delivery["consumed_at"] = datetime.now(timezone.utc).isoformat()
+            self._write_json(path, delivery)
+            thread = self._read_json(self._thread_file(delivery["thread_id"]))
+            if thread is None:
+                return None, "unknown"
+            return thread, None
+
+    def _issue_delivery_locked(
+        self,
+        thread_id: str,
+        role: str,
+        ttl_minutes: int,
+        source_drop_id: str | None = None,
+    ) -> tuple[str, str]:
+        token = secrets.token_hex(32)
+        expires_at = (
+            datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
+        ).isoformat()
+        delivery = {
+            "token": token,
+            "thread_id": thread_id,
+            "role": role,
+            "issued_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": expires_at,
+            "consumed_at": None,
+        }
+        if source_drop_id is not None:
+            delivery["source_drop_id"] = source_drop_id
+        self._write_json(self._delivery_file(token), delivery)
+        return token, expires_at
+
+    def _find_or_recover_drop_delivery_locked(
+        self, thread_id: str, drop_id: str, ttl_minutes: int
+    ) -> tuple[str, str]:
+        """Return the delivery for a processed drop, recovering an interrupted emit.
+
+        The thread marker is written before its delivery so a crash cannot duplicate
+        a GPT message. If that crash happens, a retry creates the missing delivery.
+        A consumed delivery similarly gets a fresh capability on retry.
+        """
+        now = datetime.now(timezone.utc)
+        for path in self.data_dir.glob("delivery_*.json"):
+            delivery = self._read_json(path)
+            if (
+                delivery is None
+                or delivery.get("thread_id") != thread_id
+                or delivery.get("source_drop_id") != drop_id
+            ):
+                continue
+            try:
+                unexpired = datetime.fromisoformat(delivery["expires_at"]) >= now
+            except (KeyError, ValueError):
+                unexpired = False
+            if delivery.get("consumed_at") is None and unexpired:
+                return delivery["token"], delivery["expires_at"]
+        return self._issue_delivery_locked(
+            thread_id, "gpt", ttl_minutes, source_drop_id=drop_id
+        )
+
+    def list_threads(self) -> list[dict]:
+        """List durable threads for the UI without delivery tokens."""
+        threads = []
+        with self._locked():
+            for path in sorted(self.data_dir.glob("thread_*.json")):
+                thread = self._read_json(path)
+                if thread is None:
                     continue
-        return sessions
+                threads.append(
+                    {
+                        "sid": thread["thread_id"][:12],
+                        "created_at": thread["created_at"],
+                        "message_count": len(thread.get("messages", [])),
+                    }
+                )
+        return threads
 
     def resolve_sid(self, sid: str) -> str | None:
-        """Resolve a 12-char short id to the full token, server-side only."""
+        """Resolve a UI short id to a durable thread id, server-side only."""
         if len(sid) < 12:
             return None
-        for path in self.data_dir.glob(f"{sid}*.json"):
-            return path.stem
+        with self._locked():
+            for path in self.data_dir.glob(f"thread_{sid}*.json"):
+                thread = self._read_json(path)
+                if thread is not None:
+                    return thread["thread_id"]
         return None
 
     def cleanup_expired(self) -> int:
-        """Remove expired sessions. Returns count deleted."""
+        """Remove expired delivery capabilities but retain durable threads."""
         now = datetime.now(timezone.utc)
         deleted = 0
-
-        with self.lock:
-            for path in self.data_dir.glob("*.json"):
-                try:
-                    with open(path) as f:
-                        session = json.load(f)
-                    if datetime.fromisoformat(session["expires_at"]) < now:
-                        path.unlink()
-                        deleted += 1
-                except (json.JSONDecodeError, KeyError, ValueError):
-                    path.unlink()
+        with self._locked():
+            for path in self.data_dir.glob("delivery_*.json"):
+                delivery = self._read_json(path)
+                if delivery is None:
+                    path.unlink(missing_ok=True)
                     deleted += 1
-
+                    continue
+                try:
+                    expired = datetime.fromisoformat(delivery["expires_at"]) < now
+                except (KeyError, ValueError):
+                    expired = True
+                if expired:
+                    path.unlink(missing_ok=True)
+                    deleted += 1
         return deleted
+
+    def migrate_legacy_sessions(self, dry_run: bool = False) -> dict[str, int]:
+        """Move legacy token-named sessions into durable threads safely.
+
+        The old credential is never reused as a thread id. Original JSON is
+        moved into a private backup directory only after its replacement thread
+        is durable, making retries safe after an interrupted migration.
+        """
+        results = {"migrated": 0, "already_migrated": 0, "skipped": 0}
+        backup_dir = self.data_dir / "legacy-backups"
+        with self._locked():
+            legacy_paths = [
+                path
+                for path in self.data_dir.glob("*.json")
+                if not path.name.startswith(("thread_", "delivery_"))
+            ]
+            for path in legacy_paths:
+                legacy = self._read_json(path)
+                if not self._is_legacy_session(legacy):
+                    results["skipped"] += 1
+                    continue
+                assert legacy is not None
+                digest = hashlib.sha256(
+                    json.dumps(legacy, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+                existing = self._find_migrated_thread(digest)
+                if existing is not None:
+                    results["already_migrated"] += 1
+                    if not dry_run:
+                        self._archive_legacy(path, backup_dir, digest)
+                    continue
+                if dry_run:
+                    results["migrated"] += 1
+                    continue
+                thread_id = secrets.token_hex(16)
+                while self._thread_file(thread_id).exists():
+                    thread_id = secrets.token_hex(16)
+                self._write_json(
+                    self._thread_file(thread_id),
+                    {
+                        "thread_id": thread_id,
+                        "created_at": legacy["created_at"],
+                        "messages": legacy["messages"],
+                        "migrated_from_sha256": digest,
+                    },
+                )
+                self._archive_legacy(path, backup_dir, digest)
+                results["migrated"] += 1
+        return results
+
+    @staticmethod
+    def _is_legacy_session(value: dict | None) -> bool:
+        return bool(
+            isinstance(value, dict)
+            and isinstance(value.get("token"), str)
+            and isinstance(value.get("created_at"), str)
+            and isinstance(value.get("expires_at"), str)
+            and isinstance(value.get("messages"), list)
+        )
+
+    def _find_migrated_thread(self, digest: str) -> dict | None:
+        for path in self.data_dir.glob("thread_*.json"):
+            thread = self._read_json(path)
+            if thread and thread.get("migrated_from_sha256") == digest:
+                return thread
+        return None
+
+    def _archive_legacy(self, path: Path, backup_dir: Path, digest: str) -> None:
+        backup_dir.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(backup_dir, 0o700)
+        backup_path = backup_dir / f"legacy-{digest[:16]}.json"
+        os.replace(path, backup_path)
+        os.chmod(backup_path, 0o600)
 
 
 UI_HTML = """<!doctype html>
@@ -266,26 +464,22 @@ async function loadSessions(){
   const el=$("sessions");el.innerHTML="";
   d.sessions.forEach(s=>{
     const t=document.createElement("div");
-    t.className="stab"+(s.expired?" expired":"")+(s.sid===SID?" active":"");
+    t.className="stab"+(s.sid===SID?" active":"");
     t.textContent=s.sid+"… ";
     const n=document.createElement("span");n.className="n";
     n.textContent=s.message_count;t.appendChild(n);
     t.onclick=()=>{SID=s.sid;loadSessions();loadThread()};
     el.appendChild(t)});
   if(!SID&&d.sessions.length){
-    const act=d.sessions.filter(s=>!s.expired);
-    SID=(act.length?act[act.length-1]:d.sessions[d.sessions.length-1]).sid;
+    SID=d.sessions[d.sessions.length-1].sid;
     loadSessions();loadThread()}
   $("user").textContent=d.user||""}
 async function loadThread(){
   if(!SID)return;
   const d=await j("/ui/api/thread?sid="+SID);
-  $("status").textContent=d.expired?"expirada":"● activa";
-  $("status").className="chip"+(d.expired?"":" live");
-  if(!d.expired){const ms=new Date(d.expires_at)-Date.now();
-    const h=Math.floor(ms/3.6e6),m=Math.floor(ms%3.6e6/6e4);
-    $("ttl").hidden=false;$("ttl").textContent="TTL "+h+"h "+m+"m"}
-  else $("ttl").hidden=true;
+  $("status").textContent="● hilo activo";
+  $("status").className="chip live";
+  $("ttl").hidden=true;
   const el=$("thread");el.innerHTML="";
   if(!d.messages.length)
     el.innerHTML='<div class="empty">Hilo vacío</div>';
@@ -330,8 +524,9 @@ class ExchangeHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, code: int, data: dict):
         self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(json.dumps(data, indent=2).encode() + b"\n")
 
@@ -341,11 +536,15 @@ class ExchangeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(text.encode() + b"\n")
 
-    def _get_bearer_token(self) -> str | None:
-        auth = self.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            return auth[7:]
-        return None
+    def _content_length(self) -> int | None:
+        """Parse Content-Length; reject malformed, negative, or oversized values."""
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return None
+        if length < 0 or length > 50_000_000:
+            return None
+        return length
 
     def _notify(self, role: str, message_snippet: str):
         """Send ntfy notification if configured."""
@@ -399,7 +598,7 @@ class ExchangeHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json(
                     200,
-                    {"sessions": self.store.list_sessions(), "user": email},
+                    {"sessions": self.store.list_threads(), "user": email},
                 )
                 return
             if parsed.path == "/ui/api/thread":
@@ -409,16 +608,13 @@ class ExchangeHandler(BaseHTTPRequestHandler):
                 if not token:
                     self._send_json(404, {"error": "unknown session"})
                     return
-                path = self.store._session_file(token)
-                with open(path) as f:
-                    session = json.load(f)
-                expires = datetime.fromisoformat(session["expires_at"])
+                thread = self.store.get_thread(token)
+                assert thread is not None
                 self._send_json(
                     200,
                     {
-                        "messages": session["messages"],
-                        "expires_at": session["expires_at"],
-                        "expired": expires < datetime.now(timezone.utc),
+                        "messages": thread["messages"],
+                        "created_at": thread["created_at"],
                     },
                 )
                 return
@@ -429,60 +625,21 @@ class ExchangeHandler(BaseHTTPRequestHandler):
             token = path_parts[1]
             query = parse_qs(parsed.query)
             role = query.get("role", [None])[0]
-
-            # The 256-bit path token is the credential. A Bearer header, if
-            # present, must match it; browser-only clients may omit it.
-            auth_token = self._get_bearer_token()
-            if auth_token and not secrets.compare_digest(auth_token, token):
-                self._send_json(401, {"error": "invalid authorization"})
-                return
-
             assert self.store is not None
-            messages = self.store.get_messages(token, role=role)
-            if messages is None:
-                self._send_json(401, {"error": "invalid or expired token"})
+            thread, error = self.store.redeem_delivery(token, role or "")
+            if error:
+                status = 410 if error in ("consumed", "expired") else 404
+                self._send_json(status, {"error": "delivery unavailable"})
                 return
-
-            self._send_json(200, {"messages": messages})
-            return
-
-        # GET /exchange/<token>/post?role=<r>&body=<text> — write fallback for
-        # browser-only clients that cannot send POST or custom headers.
-        if (
-            len(path_parts) == 3
-            and path_parts[0] == "exchange"
-            and path_parts[2] == "post"
-        ):
-            token = path_parts[1]
-            query = parse_qs(parsed.query)
-            role = query.get("role", [None])[0]
-            body = query.get("body", [None])[0]
-
-            if not role or role not in ("claude", "gpt", "erik"):
-                self._send_json(
-                    400, {"error": "role must be 'claude', 'gpt' or 'erik'"}
-                )
-                return
-            if not body:
-                self._send_json(400, {"error": "body query param required"})
-                return
-
-            assert self.store is not None
-            message = self.store.add_message(token, role, body)
-            if message is None:
-                self._send_json(401, {"error": "invalid or expired token"})
-                return
-
-            self._notify(role, body)
-            self._send_json(201, message)
+            assert thread is not None
+            self._send_json(200, {"messages": thread["messages"]})
             return
 
         self._send_json(404, {"error": "not found"})
 
     def do_POST(self):
-        """POST /exchange/<token> - Append message (raw text body, role in query)."""
+        """Only the authenticated UI may write to durable threads over HTTP."""
         parsed = urlparse(self.path)
-        path_parts = parsed.path.strip("/").split("/")
 
         if parsed.path == "/ui/api/send":
             if not self._ui_authorized():
@@ -499,9 +656,9 @@ class ExchangeHandler(BaseHTTPRequestHandler):
             if not token:
                 self._send_json(404, {"error": "unknown session"})
                 return
-            content_length = int(self.headers.get("Content-Length", 0))
-            if content_length > 50_000_000:
-                self._send_json(413, {"error": "body too large"})
+            content_length = self._content_length()
+            if content_length is None:
+                self._send_json(413, {"error": "body too large or malformed"})
                 return
             try:
                 body = self.rfile.read(content_length).decode("utf-8")
@@ -510,45 +667,8 @@ class ExchangeHandler(BaseHTTPRequestHandler):
                 return
             message = self.store.add_message(token, role, body)
             if message is None:
-                self._send_json(401, {"error": "invalid or expired token"})
+                self._send_json(404, {"error": "unknown thread"})
                 return
-            self._notify(role, body)
-            self._send_json(201, message)
-            return
-
-        if len(path_parts) == 2 and path_parts[0] == "exchange":
-            token = path_parts[1]
-            query = parse_qs(parsed.query)
-            role = query.get("role", [None])[0]
-
-            if not role or role not in ("claude", "gpt", "erik"):
-                self._send_json(
-                    400, {"error": "role must be 'claude', 'gpt' or 'erik'"}
-                )
-                return
-
-            auth_token = self._get_bearer_token()
-            if not auth_token or not secrets.compare_digest(auth_token, token):
-                self._send_json(401, {"error": "invalid authorization"})
-                return
-
-            content_length = int(self.headers.get("Content-Length", 0))
-            if content_length > 50_000_000:  # 50 MiB limit
-                self._send_json(413, {"error": "body too large"})
-                return
-
-            try:
-                body = self.rfile.read(content_length).decode("utf-8")
-            except UnicodeDecodeError:
-                self._send_json(400, {"error": "invalid utf-8"})
-                return
-
-            assert self.store is not None
-            message = self.store.add_message(token, role, body)
-            if message is None:
-                self._send_json(401, {"error": "invalid or expired token"})
-                return
-
             self._notify(role, body)
             self._send_json(201, message)
             return
@@ -556,17 +676,16 @@ class ExchangeHandler(BaseHTTPRequestHandler):
         self._send_json(404, {"error": "not found"})
 
     def do_OPTIONS(self):
-        """Handle CORS preflight."""
+        """No cross-origin clients exist; answer preflights without CORS grants."""
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        self.send_header("Allow", "GET, POST, OPTIONS")
         self.end_headers()
-
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Claude-GPT Exchange Server: session-based message exchange."
+        description=(
+            "Claude-GPT Exchange Server: durable threads and one-time delivery URLs."
+        )
     )
     parser.add_argument(
         "--port", type=int, default=9741, help="HTTP port (default 9741)"
@@ -609,7 +728,7 @@ def main():
     store = ExchangeStore(args.data_dir)
     deleted = store.cleanup_expired()
     if deleted:
-        print(f"Cleaned up {deleted} expired session(s)", file=sys.stderr)
+        print(f"Cleaned up {deleted} expired delivery capability(s)", file=sys.stderr)
     ExchangeHandler.store = store
     ExchangeHandler.ntfy_config = ntfy_config
     ExchangeHandler.ui_email = args.ui_email
@@ -617,7 +736,8 @@ def main():
         print(f"UI enabled for {args.ui_email} at /ui", file=sys.stderr)
 
     # Server
-    server = HTTPServer(("127.0.0.1", args.port), ExchangeHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), ExchangeHandler)
+    server.daemon_threads = True
     print(
         f"Claude-GPT Exchange listening on http://127.0.0.1:{args.port}",
         file=sys.stderr,

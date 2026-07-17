@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""
-CLI tool to create and manage Claude-GPT exchange sessions.
-
-Usage:
-  python3 exchange-cli.py create [--ttl 120] [--data-dir ./gpt-exchange-data]
-  python3 exchange-cli.py list [--data-dir ./gpt-exchange-data]
-  python3 exchange-cli.py health [--port 9741]
-"""
+"""Manage durable exchange threads and one-time GPT delivery URLs."""
 
 import argparse
 import importlib.util
@@ -17,7 +10,7 @@ from pathlib import Path
 
 
 def _load_exchange_store():
-    """Load ExchangeStore from claude-gpt-exchange.py (hyphenated filename)."""
+    """Load ExchangeStore from the hyphenated server module."""
     module_path = Path(__file__).parent / "claude-gpt-exchange.py"
     spec = importlib.util.spec_from_file_location("claude_gpt_exchange", module_path)
     assert spec is not None and spec.loader is not None
@@ -26,111 +19,134 @@ def _load_exchange_store():
     return module.ExchangeStore
 
 
-def create_session(data_dir: Path, ttl_minutes: int) -> tuple[str, str]:
-    """Create a new session using the store directly (no server required)."""
-    ExchangeStore = _load_exchange_store()
-    store = ExchangeStore(data_dir)
-    token, expires_at = store.create_session(ttl_minutes=ttl_minutes)
+def _store(data_dir: Path):
+    return _load_exchange_store()(data_dir)
+
+
+def create_thread(data_dir: Path, ttl_minutes: int) -> tuple[str, str, str]:
+    """Create a durable thread and its first GPT delivery capability."""
+    store = _store(data_dir)
+    thread_id = store.create_thread()
+    token, expires_at = store.issue_delivery(thread_id, ttl_minutes=ttl_minutes)
+    return thread_id, token, expires_at
+
+
+def issue_delivery(data_dir: Path, sid: str, ttl_minutes: int) -> tuple[str, str]:
+    """Issue a fresh GPT delivery URL for an existing durable thread."""
+    store = _store(data_dir)
+    thread_id = store.resolve_sid(sid) or sid
+    token, expires_at = store.issue_delivery(thread_id, ttl_minutes=ttl_minutes)
     return token, expires_at
-
-
-def list_sessions(data_dir: Path) -> list[dict]:
-    """List all active sessions."""
-    from datetime import datetime, timezone
-
-    data_dir = Path(data_dir)
-    sessions = []
-
-    for path in sorted(data_dir.glob("*.json")):
-        try:
-            with open(path) as f:
-                session = json.load(f)
-
-            expires_at = datetime.fromisoformat(session["expires_at"])
-            is_expired = expires_at < datetime.now(timezone.utc)
-            msg_count = len(session.get("messages", []))
-
-            sessions.append(
-                {
-                    "token": session["token"][:16] + "...",
-                    "created_at": session["created_at"],
-                    "expires_at": session["expires_at"],
-                    "is_expired": is_expired,
-                    "message_count": msg_count,
-                }
-            )
-        except (json.JSONDecodeError, KeyError):
-            pass
-
-    return sessions
 
 
 def health_check(port: int) -> bool:
     """Check if server is running."""
     try:
         req = urllib.request.Request(f"http://127.0.0.1:{port}/health")
-        with urllib.request.urlopen(req, timeout=2) as f:
-            data = json.loads(f.read())
-            return data.get("status") == "ok"
+        with urllib.request.urlopen(req, timeout=2) as response:
+            return json.loads(response.read()).get("status") == "ok"
     except Exception:
         return False
 
 
+def _delivery_url(base_url: str, token: str) -> str:
+    return f"{base_url.rstrip('/')}/exchange/{token}?role=gpt"
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Manage Claude-GPT exchange sessions")
+    parser = argparse.ArgumentParser(
+        description="Manage durable exchange threads and one-time GPT delivery URLs"
+    )
     subparsers = parser.add_subparsers(dest="command", help="Command")
 
-    # create
-    create_parser = subparsers.add_parser("create", help="Create a new session")
+    create_parser = subparsers.add_parser(
+        "create", help="Create a thread and delivery"
+    )
     create_parser.add_argument(
-        "--ttl", type=int, default=120, help="TTL in minutes (default 120)"
+        "--ttl", type=int, default=15, help="Delivery TTL in minutes"
     )
     create_parser.add_argument(
         "--data-dir", type=Path, default=Path("./gpt-exchange-data")
     )
+    create_parser.add_argument("--base-url", default="https://drop.krinekk.dev")
 
-    # list
-    list_parser = subparsers.add_parser("list", help="List active sessions")
+    deliver_parser = subparsers.add_parser("deliver", help="Issue a fresh delivery")
+    deliver_parser.add_argument(
+        "--sid", required=True, help="UI short id or full thread id"
+    )
+    deliver_parser.add_argument(
+        "--ttl", type=int, default=15, help="Delivery TTL in minutes"
+    )
+    deliver_parser.add_argument(
+        "--data-dir", type=Path, default=Path("./gpt-exchange-data")
+    )
+    deliver_parser.add_argument("--base-url", default="https://drop.krinekk.dev")
+
+    list_parser = subparsers.add_parser("list", help="List durable threads")
     list_parser.add_argument(
         "--data-dir", type=Path, default=Path("./gpt-exchange-data")
     )
 
-    # health
+    migrate_parser = subparsers.add_parser(
+        "migrate", help="Migrate token-named legacy sessions into durable threads"
+    )
+    migrate_parser.add_argument(
+        "--data-dir", type=Path, default=Path("./gpt-exchange-data")
+    )
+    migrate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report legacy sessions without changing data",
+    )
+
     health_parser = subparsers.add_parser("health", help="Check server health")
     health_parser.add_argument("--port", type=int, default=9741)
 
     args = parser.parse_args()
 
     if args.command == "create":
-        token, expires_at = create_session(args.data_dir, args.ttl)
-        print("✓ Session created", file=sys.stderr)
-        print(f"Token:     {token}")
-        print(f"Expires:   {expires_at}")
-        base = f"http://localhost:9741/exchange/{token}"
-        print(f"Claude URL:  {base}?role=claude", file=sys.stderr)
-        print(f"GPT URL:     {base}?role=gpt", file=sys.stderr)
+        thread_id, token, expires_at = create_thread(args.data_dir, args.ttl)
+        print(f"Thread sid: {thread_id[:12]}", file=sys.stderr)
+        print(f"Delivery expires: {expires_at}", file=sys.stderr)
+        print(_delivery_url(args.base_url, token))
+        return
+
+    if args.command == "deliver":
+        try:
+            token, expires_at = issue_delivery(args.data_dir, args.sid, args.ttl)
+        except ValueError as error:
+            print(f"Cannot issue delivery: {error}", file=sys.stderr)
+            sys.exit(1)
+        print(f"Delivery expires: {expires_at}", file=sys.stderr)
+        print(_delivery_url(args.base_url, token))
         return
 
     if args.command == "list":
-        sessions = list_sessions(args.data_dir)
-        if not sessions:
-            print("No sessions found")
+        threads = _store(args.data_dir).list_threads()
+        if not threads:
+            print("No threads found")
             return
-        print(f"\n{len(sessions)} session(s):\n")
-        for s in sessions:
-            status = "EXPIRED" if s["is_expired"] else "ACTIVE"
+        for thread in threads:
             print(
-                f"  {s['token']:20} {s['created_at']} → {s['expires_at']} "
-                f"({status}, {s['message_count']} msgs)"
+                f"{thread['sid']}  {thread['created_at']} "
+                f"({thread['message_count']} messages)"
             )
         return
 
+    if args.command == "migrate":
+        result = _store(args.data_dir).migrate_legacy_sessions(dry_run=args.dry_run)
+        mode = "would migrate" if args.dry_run else "migrated"
+        print(
+            f"{mode}: {result['migrated']}; already migrated: "
+            f"{result['already_migrated']}; skipped: {result['skipped']}"
+        )
+        return
+
     if args.command == "health":
-        ok = health_check(args.port)
-        if ok:
-            print(f"✓ Server ok (http://127.0.0.1:{args.port})")
+        if health_check(args.port):
+            print(f"Server ok (http://127.0.0.1:{args.port})")
             return
-        print(f"✗ Server not responding on port {args.port}")
+        print(f"Server not responding on port {args.port}")
         sys.exit(1)
 
     parser.print_help()
