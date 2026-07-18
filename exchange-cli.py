@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manage durable exchange threads and one-time GPT delivery URLs."""
+"""Manage one-time deliveries and explicit compatibility grants."""
 
 import argparse
 import importlib.util
@@ -9,18 +9,30 @@ import urllib.request
 from pathlib import Path
 
 
-def _load_exchange_store():
-    """Load ExchangeStore from the hyphenated server module."""
+def _load_exchange_module():
+    """Load the hyphenated server module."""
     module_path = Path(__file__).parent / "claude-gpt-exchange.py"
     spec = importlib.util.spec_from_file_location("claude_gpt_exchange", module_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.ExchangeStore
+    return module
+
+
+def _load_exchange_store():
+    return _load_exchange_module().ExchangeStore
 
 
 def _store(data_dir: Path):
     return _load_exchange_store()(data_dir)
+
+
+def _compatibility_store(data_dir: Path):
+    module = _load_exchange_module()
+    thread_store = module.ExchangeStore(data_dir)
+    return module.CompatibilityGrantStore(
+        data_dir / "compatibility", thread_store
+    ), thread_store
 
 
 def create_thread(data_dir: Path, ttl_minutes: int) -> tuple[str, str, str]:
@@ -39,6 +51,19 @@ def issue_delivery(data_dir: Path, sid: str, ttl_minutes: int) -> tuple[str, str
     return token, expires_at
 
 
+def issue_compatibility(data_dir: Path, sid: str, ttl_minutes: int):
+    """Issue a replayable compatibility grant for exactly one thread."""
+    store, thread_store = _compatibility_store(data_dir)
+    thread_id = thread_store.resolve_sid(sid) or sid
+    return store.issue(thread_id, ttl_minutes=ttl_minutes, allowed_roles=("gpt",))
+
+
+def revoke_compatibility(data_dir: Path, token: str) -> bool:
+    """Explicitly revoke one compatibility capability."""
+    store, _thread_store = _compatibility_store(data_dir)
+    return store.revoke(token)
+
+
 def health_check(port: int) -> bool:
     """Check if server is running."""
     try:
@@ -53,9 +78,13 @@ def _delivery_url(base_url: str, token: str) -> str:
     return f"{base_url.rstrip('/')}/exchange/{token}"
 
 
+def _compatibility_url(base_url: str, token: str) -> str:
+    return f"{base_url.rstrip('/')}/compatibility/{token}"
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Manage durable exchange threads and one-time GPT delivery URLs"
+        description="Manage one-time deliveries and explicit compatibility grants"
     )
     subparsers = parser.add_subparsers(dest="command", help="Command")
 
@@ -81,6 +110,34 @@ def main():
         "--data-dir", type=Path, default=Path("./gpt-exchange-data")
     )
     deliver_parser.add_argument("--base-url", default="https://drop.krinekk.dev")
+
+    compatibility_issue_parser = subparsers.add_parser(
+        "compatibility-issue",
+        help="Issue an explicit replayable compatibility grant",
+    )
+    compatibility_issue_parser.add_argument(
+        "--sid", required=True, help="UI short id or full thread id"
+    )
+    compatibility_issue_parser.add_argument(
+        "--ttl", type=int, default=5, help="Compatibility TTL in minutes (1-15)"
+    )
+    compatibility_issue_parser.add_argument(
+        "--role", choices=("gpt",), default="gpt", help="Allowed reader role"
+    )
+    compatibility_issue_parser.add_argument(
+        "--data-dir", type=Path, default=Path("./gpt-exchange-data")
+    )
+    compatibility_issue_parser.add_argument(
+        "--base-url", default="https://drop.krinekk.dev"
+    )
+
+    compatibility_revoke_parser = subparsers.add_parser(
+        "compatibility-revoke", help="Revoke a compatibility grant"
+    )
+    compatibility_revoke_parser.add_argument("--token", required=True)
+    compatibility_revoke_parser.add_argument(
+        "--data-dir", type=Path, default=Path("./gpt-exchange-data")
+    )
 
     list_parser = subparsers.add_parser("list", help="List durable threads")
     list_parser.add_argument(
@@ -119,6 +176,29 @@ def main():
             sys.exit(1)
         print(f"Delivery expires: {expires_at}", file=sys.stderr)
         print(_delivery_url(args.base_url, token))
+        return
+
+    if args.command == "compatibility-issue":
+        try:
+            token, grant = issue_compatibility(args.data_dir, args.sid, args.ttl)
+        except ValueError as error:
+            print(f"Cannot issue compatibility grant: {error}", file=sys.stderr)
+            sys.exit(1)
+        print(grant.mode, file=sys.stderr)
+        print(f"Scope: single thread {grant.thread_id[:12]}", file=sys.stderr)
+        print(
+            f"Allowed reader roles: {','.join(grant.allowed_reader_roles)}",
+            file=sys.stderr,
+        )
+        print(f"Compatibility grant expires: {grant.expires_at}", file=sys.stderr)
+        print(_compatibility_url(args.base_url, token))
+        return
+
+    if args.command == "compatibility-revoke":
+        if not revoke_compatibility(args.data_dir, args.token):
+            print("Compatibility grant not found", file=sys.stderr)
+            sys.exit(1)
+        print("Compatibility grant revoked")
         return
 
     if args.command == "list":

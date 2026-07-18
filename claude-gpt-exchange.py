@@ -12,6 +12,7 @@ Delivery URL format:
 
 API:
   GET  /exchange/<one-time-token>  - Redeem one GPT thread snapshot
+  GET  /compatibility/<token>      - Replay an explicit compatibility snapshot
   POST /ui/api/send                         - Append as the authenticated UI user
   GET  /health                           - Health check
 """
@@ -21,15 +22,114 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import secrets
 import sys
 import urllib.request
 from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Lock
 from urllib.parse import parse_qs, urlparse
+
+COMPATIBILITY_MODE_LABEL = "COMPATIBILITY MODE — REPLAYABLE UNTIL EXPIRY"
+COMPATIBILITY_MODE = "compatibility"
+COMPATIBILITY_CACHE_NOTICE = (
+    "REVOCATION MAY TAKE UP TO 60 SECONDS IN SHARED CACHES"
+)
+COMPATIBILITY_SCHEMA = "drop-exchange/compatibility-grant-v1"
+COMPATIBILITY_DEFAULT_TTL_MINUTES = 5
+COMPATIBILITY_MAX_TTL_MINUTES = 15
+COMPATIBILITY_CACHE_MAX_AGE_SECONDS = 60
+COMPATIBILITY_MAX_MESSAGES = 64
+COMPATIBILITY_MAX_MESSAGE_BYTES = 32 * 1024
+COMPATIBILITY_MAX_TOTAL_BYTES = 128 * 1024
+COMPATIBILITY_ALLOWED_READER_ROLES = ("gpt",)
+COMPATIBILITY_METRIC_NAMES = (
+    "compatibility_grants_issued_total",
+    "compatibility_first_reads_total",
+    "compatibility_replays_total",
+    "compatibility_role_denied_total",
+    "compatibility_revocations_total",
+    "compatibility_revoked_reads_total",
+    "compatibility_expired_reads_total",
+    "compatibility_unknown_reads_total",
+    "compatibility_content_rejections_total",
+)
+COMPATIBILITY_SENSITIVE_PATTERNS = (
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+    re.compile(r"\bauthorization\s*:\s*bearer\s+\S+", re.IGNORECASE),
+    re.compile(
+        r"\b(?:api[_-]?key|access[_-]?token|client[_-]?secret|password)"
+        r"\s*[:=]\s*\S+",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\b(?:sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,})\b"),
+)
+
+
+def _compatibility_snapshot_hash(snapshot: dict) -> str:
+    canonical = json.dumps(
+        snapshot,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+    return hashlib.sha256(canonical).hexdigest()
+
+
+@dataclass(frozen=True)
+class CompatibilityGrant:
+    """Persisted compatibility grant, distinct from one-time deliveries."""
+
+    schema: str
+    mode: str
+    grant_id: str
+    thread_id: str
+    allowed_reader_roles: list[str]
+    issued_at: str
+    expires_at: str
+    revoked_at: str | None
+    read_count: int
+    snapshot: dict
+    snapshot_hash: str
+
+    @classmethod
+    def from_dict(cls, value: dict) -> "CompatibilityGrant":
+        grant = cls(**value)
+        if grant.schema != COMPATIBILITY_SCHEMA:
+            raise ValueError("invalid compatibility schema")
+        if grant.mode != COMPATIBILITY_MODE_LABEL:
+            raise ValueError("invalid compatibility mode")
+        if grant.allowed_reader_roles != list(COMPATIBILITY_ALLOWED_READER_ROLES):
+            raise ValueError("invalid compatibility reader roles")
+        if re.fullmatch(r"[0-9a-f]{24}", grant.grant_id) is None:
+            raise ValueError("invalid compatibility grant id")
+        if re.fullmatch(r"[0-9a-f]{32}", grant.thread_id) is None:
+            raise ValueError("invalid compatibility thread scope")
+        if type(grant.read_count) is not int or grant.read_count < 0:
+            raise ValueError("invalid compatibility read count")
+        issued_at = datetime.fromisoformat(grant.issued_at)
+        expires_at = datetime.fromisoformat(grant.expires_at)
+        if issued_at.tzinfo is None or expires_at.tzinfo is None:
+            raise ValueError("compatibility timestamps must be timezone-aware")
+        if expires_at <= issued_at:
+            raise ValueError("invalid compatibility expiry")
+        if grant.revoked_at is not None:
+            revoked_at = datetime.fromisoformat(grant.revoked_at)
+            if revoked_at.tzinfo is None:
+                raise ValueError("compatibility timestamps must be timezone-aware")
+        if not isinstance(grant.snapshot, dict):
+            raise ValueError("invalid compatibility snapshot")
+        if re.fullmatch(r"[0-9a-f]{64}", grant.snapshot_hash) is None:
+            raise ValueError("invalid compatibility snapshot hash")
+        if not secrets.compare_digest(
+            grant.snapshot_hash, _compatibility_snapshot_hash(grant.snapshot)
+        ):
+            raise ValueError("compatibility snapshot integrity check failed")
+        return grant
 
 
 class ExchangeStore:
@@ -359,6 +459,232 @@ class ExchangeStore:
         os.chmod(backup_path, 0o600)
 
 
+class CompatibilityGrantStore:
+    """Replayable, expiring grants stored outside one-time delivery state."""
+
+    def __init__(self, data_dir: Path, thread_store: ExchangeStore, now_fn=None):
+        self.data_dir = Path(data_dir)
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.data_dir, 0o700)
+        self.thread_store = thread_store
+        self.now_fn = now_fn or (lambda: datetime.now(timezone.utc))
+        self.lock = Lock()
+        self.lock_path = self.data_dir / ".compatibility.lock"
+        self.lock_path.touch(exist_ok=True)
+        os.chmod(self.lock_path, 0o600)
+        self.metrics_path = self.data_dir / "metrics.json"
+
+    @contextmanager
+    def _locked(self):
+        with self.lock:
+            with open(self.lock_path, "a+") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _read_json(path: Path) -> dict | None:
+        try:
+            with open(path) as file:
+                return json.load(file)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+
+    @staticmethod
+    def _write_json(path: Path, data: dict) -> None:
+        temp_path = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+        with open(temp_path, "w") as file:
+            json.dump(data, file, indent=2)
+            file.flush()
+            os.fsync(file.fileno())
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, path)
+
+    def _grant_file(self, token: str) -> Path:
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        return self.data_dir / f"grant_{digest}.json"
+
+    def _empty_metrics(self) -> dict[str, int]:
+        return {name: 0 for name in COMPATIBILITY_METRIC_NAMES}
+
+    def _metrics_locked(self) -> dict[str, int]:
+        metrics = self._read_json(self.metrics_path)
+        if not isinstance(metrics, dict):
+            return self._empty_metrics()
+        return {
+            name: int(metrics.get(name, 0)) for name in COMPATIBILITY_METRIC_NAMES
+        }
+
+    def _increment_locked(self, metric: str) -> None:
+        metrics = self._metrics_locked()
+        metrics[metric] += 1
+        self._write_json(self.metrics_path, metrics)
+
+    def _increment(self, metric: str) -> None:
+        with self._locked():
+            self._increment_locked(metric)
+
+    def metrics(self) -> dict[str, int]:
+        with self._locked():
+            return self._metrics_locked()
+
+    def issue(
+        self,
+        thread_id: str,
+        ttl_minutes: int = COMPATIBILITY_DEFAULT_TTL_MINUTES,
+        allowed_roles: tuple[str, ...] = COMPATIBILITY_ALLOWED_READER_ROLES,
+    ) -> tuple[str, CompatibilityGrant]:
+        if not 1 <= ttl_minutes <= COMPATIBILITY_MAX_TTL_MINUTES:
+            raise ValueError("compatibility TTL must be between 1 and 15 minutes")
+        if tuple(allowed_roles) != COMPATIBILITY_ALLOWED_READER_ROLES:
+            raise ValueError("only the gpt reader role is supported")
+        thread = self.thread_store.get_thread(thread_id)
+        if thread is None:
+            raise ValueError("unknown thread")
+        try:
+            snapshot = self._validated_snapshot(thread)
+        except ValueError:
+            self._increment("compatibility_content_rejections_total")
+            raise
+
+        now = self.now_fn()
+        token = secrets.token_hex(32)
+        grant = CompatibilityGrant(
+            schema=COMPATIBILITY_SCHEMA,
+            mode=COMPATIBILITY_MODE_LABEL,
+            grant_id=secrets.token_hex(12),
+            thread_id=thread_id,
+            allowed_reader_roles=list(allowed_roles),
+            issued_at=now.isoformat(),
+            expires_at=(now + timedelta(minutes=ttl_minutes)).isoformat(),
+            revoked_at=None,
+            read_count=0,
+            snapshot=snapshot,
+            snapshot_hash=_compatibility_snapshot_hash(snapshot),
+        )
+        with self._locked():
+            self._write_json(self._grant_file(token), asdict(grant))
+            self._increment_locked("compatibility_grants_issued_total")
+        return token, grant
+
+    def read(self, token: str, role: str) -> tuple[dict | None, str | None]:
+        snapshot, error, _event, _grant_id = self.read_for_http(token, role)
+        return snapshot, error
+
+    def read_for_http(
+        self, token: str, role: str
+    ) -> tuple[dict | None, str | None, str, str | None]:
+        with self._locked():
+            path = self._grant_file(token)
+            raw_grant = self._read_json(path)
+            if raw_grant is None:
+                self._increment_locked("compatibility_unknown_reads_total")
+                return None, "unknown", "denied", None
+            try:
+                grant = CompatibilityGrant.from_dict(raw_grant)
+            except (TypeError, ValueError):
+                self._increment_locked("compatibility_unknown_reads_total")
+                return None, "unknown", "denied", None
+            if role not in grant.allowed_reader_roles:
+                self._increment_locked("compatibility_role_denied_total")
+                return None, "role", "denied", grant.grant_id
+            if grant.revoked_at is not None:
+                self._increment_locked("compatibility_revoked_reads_total")
+                return None, "revoked", "denied", grant.grant_id
+            if self.now_fn() >= datetime.fromisoformat(grant.expires_at):
+                self._increment_locked("compatibility_expired_reads_total")
+                return None, "expired", "denied", grant.grant_id
+            try:
+                snapshot = self._validated_snapshot(grant.snapshot)
+            except ValueError:
+                self._increment_locked("compatibility_content_rejections_total")
+                return None, "content", "denied", grant.grant_id
+
+            event = "first_read" if grant.read_count == 0 else "replay"
+            metric = (
+                "compatibility_first_reads_total"
+                if grant.read_count == 0
+                else "compatibility_replays_total"
+            )
+            updated = CompatibilityGrant(
+                **{**asdict(grant), "read_count": grant.read_count + 1}
+            )
+            self._write_json(path, asdict(updated))
+            self._increment_locked(metric)
+            payload = {
+                "schema": grant.schema,
+                "mode": COMPATIBILITY_MODE,
+                "warning": COMPATIBILITY_MODE_LABEL,
+                "revocable": True,
+                "cache_notice": COMPATIBILITY_CACHE_NOTICE,
+                "thread_id": grant.thread_id,
+                "snapshot_hash": grant.snapshot_hash,
+                "scope": {"type": "single_thread", "thread_id": grant.thread_id},
+                "allowed_reader_roles": grant.allowed_reader_roles,
+                "issued_at": grant.issued_at,
+                "expires_at": grant.expires_at,
+                "messages": snapshot["messages"],
+            }
+            return payload, None, event, grant.grant_id
+
+    def revoke(self, token: str) -> bool:
+        with self._locked():
+            path = self._grant_file(token)
+            raw_grant = self._read_json(path)
+            if raw_grant is None:
+                return False
+            grant = CompatibilityGrant.from_dict(raw_grant)
+            if grant.revoked_at is None:
+                updated = CompatibilityGrant(
+                    **{**asdict(grant), "revoked_at": self.now_fn().isoformat()}
+                )
+                self._write_json(path, asdict(updated))
+                self._increment_locked("compatibility_revocations_total")
+            return True
+
+    @staticmethod
+    def _validated_snapshot(thread: dict) -> dict:
+        messages = thread.get("messages")
+        if not isinstance(messages, list):
+            raise ValueError("compatibility snapshot requires text messages")
+        if len(messages) > COMPATIBILITY_MAX_MESSAGES:
+            raise ValueError("compatibility snapshot has too many messages")
+
+        clean_messages = []
+        total_bytes = 0
+        attachment_fields = {"attachment", "attachments", "file", "files"}
+        for message in messages:
+            if not isinstance(message, dict):
+                raise ValueError("compatibility snapshot requires text messages")
+            if attachment_fields.intersection(message):
+                raise ValueError("attachments are not supported in compatibility mode")
+            body = message.get("body")
+            if not isinstance(body, str):
+                raise ValueError("compatibility snapshot requires text messages")
+            body_bytes = len(body.encode("utf-8"))
+            if body_bytes > COMPATIBILITY_MAX_MESSAGE_BYTES:
+                raise ValueError("compatibility message exceeds content limit")
+            total_bytes += body_bytes
+            if total_bytes > COMPATIBILITY_MAX_TOTAL_BYTES:
+                raise ValueError("compatibility snapshot exceeds content limit")
+            if any(
+                pattern.search(body) for pattern in COMPATIBILITY_SENSITIVE_PATTERNS
+            ):
+                raise ValueError(
+                    "sensitive content is not accepted in compatibility mode"
+                )
+            clean_messages.append(
+                {
+                    key: message[key]
+                    for key in ("id", "role", "body", "posted_at")
+                    if key in message
+                }
+            )
+        return {"messages": clean_messages}
+
+
 UI_HTML = """<!doctype html>
 <html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -508,6 +834,7 @@ TIMER=setInterval(()=>{loadSessions();if(SID)loadThread()},10000);
 
 class ExchangeHandler(BaseHTTPRequestHandler):
     store: "ExchangeStore | None" = None
+    compatibility_store: "CompatibilityGrantStore | None" = None
     ntfy_config: "dict | None" = None
     ui_email: "str | None" = None
 
@@ -529,6 +856,40 @@ class ExchangeHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(json.dumps(data, indent=2).encode() + b"\n")
+
+    def _send_compatibility_json(
+        self, code: int, data: dict, cache_max_age: int = 0
+    ) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        if code == 200:
+            self.send_header(
+                "Cache-Control", f"public, max-age={cache_max_age}, must-revalidate"
+            )
+        else:
+            self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Drop-Exchange-Mode", "compatibility-replayable")
+        self.end_headers()
+        self.wfile.write(json.dumps(data, indent=2).encode() + b"\n")
+
+    @staticmethod
+    def _compatibility_log(
+        event: str,
+        outcome: str,
+        grant_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> None:
+        record = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mode": COMPATIBILITY_MODE_LABEL,
+            "event": event,
+            "outcome": outcome,
+            "grant_id": grant_id or "unknown",
+        }
+        if thread_id:
+            record["thread_id"] = thread_id
+        print(json.dumps(record, separators=(",", ":")), file=sys.stderr)
 
     def _send_text(self, code: int, text: str):
         self.send_response(code)
@@ -618,7 +979,62 @@ class ExchangeHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            if parsed.path == "/ui/api/compatibility/metrics":
+                assert self.compatibility_store is not None
+                self._send_json(
+                    200,
+                    {
+                        "mode": COMPATIBILITY_MODE,
+                        "warning": COMPATIBILITY_MODE_LABEL,
+                        "metrics": self.compatibility_store.metrics(),
+                    },
+                )
+                return
             self._send_json(404, {"error": "not found"})
+            return
+
+        if len(path_parts) == 2 and path_parts[0] == "compatibility":
+            token = path_parts[1]
+            role = parse_qs(parsed.query, keep_blank_values=True).get(
+                "role", ["gpt"]
+            )[0]
+            assert self.compatibility_store is not None
+            payload, error, event, grant_id = (
+                self.compatibility_store.read_for_http(token, role or "")
+            )
+            if error:
+                status = 403 if error == "role" else 410
+                if error == "unknown":
+                    status = 404
+                self._compatibility_log(event, error, grant_id)
+                self._send_compatibility_json(
+                    status,
+                    {
+                        "mode": COMPATIBILITY_MODE,
+                        "warning": COMPATIBILITY_MODE_LABEL,
+                        "revocable": True,
+                        "error": "compatibility grant unavailable",
+                        "reason": error,
+                    },
+                )
+                return
+            assert payload is not None
+            remaining = int(
+                (
+                    datetime.fromisoformat(payload["expires_at"])
+                    - datetime.now(timezone.utc)
+                ).total_seconds()
+            )
+            cache_max_age = max(
+                1, min(COMPATIBILITY_CACHE_MAX_AGE_SECONDS, remaining)
+            )
+            self._compatibility_log(
+                event,
+                "allowed",
+                grant_id,
+                payload["thread_id"],
+            )
+            self._send_compatibility_json(200, payload, cache_max_age)
             return
 
         if len(path_parts) == 2 and path_parts[0] == "exchange":
@@ -642,6 +1058,20 @@ class ExchangeHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         """Only the authenticated UI may write to durable threads over HTTP."""
         parsed = urlparse(self.path)
+
+        path_parts = parsed.path.strip("/").split("/")
+        if len(path_parts) == 2 and path_parts[0] == "compatibility":
+            self._compatibility_log("denied", "method_not_allowed")
+            self._send_compatibility_json(
+                405,
+                {
+                    "mode": COMPATIBILITY_MODE,
+                    "warning": COMPATIBILITY_MODE_LABEL,
+                    "revocable": True,
+                    "error": "compatibility mode is read-only",
+                },
+            )
+            return
 
         if parsed.path == "/ui/api/send":
             if not self._ui_authorized():
@@ -732,6 +1162,9 @@ def main():
     if deleted:
         print(f"Cleaned up {deleted} expired delivery capability(s)", file=sys.stderr)
     ExchangeHandler.store = store
+    ExchangeHandler.compatibility_store = CompatibilityGrantStore(
+        args.data_dir / "compatibility", store
+    )
     ExchangeHandler.ntfy_config = ntfy_config
     ExchangeHandler.ui_email = args.ui_email
     if args.ui_email:

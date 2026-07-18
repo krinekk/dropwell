@@ -20,6 +20,50 @@ single-use delivery URL whenever GPT must read one.
 This reduces replay exposure; it does not make a leaked URL harmless before it
 is redeemed or expires. Treat each delivery URL as a short-lived secret.
 
+## Explicit compatibility mode
+
+Cache-backed readers that cannot reach a fresh one-time URL may use a separate,
+explicitly issued compatibility grant. It is always labeled:
+
+> **COMPATIBILITY MODE — REPLAYABLE UNTIL EXPIRY**
+
+This is never a fallback from `/exchange/<token>`. Compatibility uses
+`GET /compatibility/<token>`, distinct typed records and
+`<data-dir>/compatibility/` persistence. It returns an immutable, text-only
+snapshot of exactly one thread, permits only the `gpt` reader role, defaults to
+a 5-minute TTL (enforced range 1–15), and can be replayed until expiry or
+explicit revocation. Successful compatibility responses are publicly cacheable
+for at most 60 seconds at a time; one-time responses remain `no-store`.
+The response identifies `mode=compatibility`, carries the mandatory warning,
+expiry, revocability, thread id, and a verified immutable `snapshot_hash`, and
+states that cached revocation may converge up to 60 seconds after origin
+revocation.
+
+Issue a grant explicitly for an existing thread:
+
+```bash
+uv run python exchange-cli.py compatibility-issue \
+  --sid <thread-sid> \
+  --ttl 5 \
+  --data-dir ~/.local/state/drop-exchange/data \
+  --base-url https://drop.krinekk.dev
+```
+
+Revoke it with the capability token from that URL:
+
+```bash
+uv run python exchange-cli.py compatibility-revoke \
+  --token <compatibility-token> \
+  --data-dir ~/.local/state/drop-exchange/data
+```
+
+There is no compatibility `POST`, upload route, CORS grant, or write bridge.
+GPT replies still use `drop(topic="gpt-exchange")`. Secret-like content,
+attachments, non-text bodies, and oversized snapshots are rejected at grant
+issuance and revalidated on origin reads. See
+[`EXCHANGE-COMPATIBILITY.md`](EXCHANGE-COMPATIBILITY.md) for the full boundary,
+threat model, metrics, and rollback contract.
+
 ## Operator flow
 
 Start the server and UI behind the existing authenticated reverse proxy:
@@ -112,7 +156,9 @@ command. Do not run the actual migration or restart from an uncommitted tree.
 
 ```bash
 uv run python -m unittest -v test_one_time_deliveries.py
+uv run python -m unittest -v test_compatibility_mode.py
 uv run python test-exchange.py
 uv run --extra dev ruff check claude-gpt-exchange.py exchange-cli.py \
-  exchange_drop_bridge.py test_one_time_deliveries.py test-exchange.py
+  exchange_drop_bridge.py test_one_time_deliveries.py \
+  test_compatibility_mode.py test-exchange.py
 ```
